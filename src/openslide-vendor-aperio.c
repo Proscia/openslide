@@ -430,10 +430,6 @@ static bool aperio_open(openslide_t *osr,
     goto FAIL;
   }
 
-  char gt450_workaround = 0;
-  if (strncmp(image_desc_pre, "Aperio Leica Biosystems GT450", strlen("Aperio Leica Biosystems GT450")) == 0)
-      gt450_workaround = 1;
-
   /*
    * http://www.aperio.com/documents/api/Aperio_Digital_Slides_and_Third-party_data_interchange.pdf
    * page 14:
@@ -548,13 +544,27 @@ static bool aperio_open(openslide_t *osr,
       }
     } else {
       // associated image
-      const char *name = (dir == 1) ? "thumbnail" : NULL;
-      if (gt450_workaround) {
-          if(dir == 5)
-              name = "label";
-          if (dir == 6)
-              name = "macro";
+      uint32_t subfile_type;
+      const char *name;
+
+      if (!TIFFGetField(tiff, TIFFTAG_SUBFILETYPE, &subfile_type)) {
+        // Fallback to the older detection mechanism, as it is not validated that this mechanism works for all scanners
+        name = (dir == 1) ? "thumbnail" : NULL;
+      } else {
+        // GT450 scanner
+        // According to info from Leica: https://github.com/openslide/openslide/issues/297#issuecomment-813424628
+        switch (subfile_type) {
+          case 1:
+            name = "label";
+            break;
+          case 9:
+            name = "macro";
+            break;
+          default:
+            name = (dir == 1) ? "thumbnail" : NULL;
+        } 
       }
+
       if (!add_associated_image(osr, name, tc, tiff, err)) {
 	goto FAIL;
       }
