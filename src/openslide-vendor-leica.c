@@ -669,7 +669,8 @@ static bool create_levels_from_collection(openslide_t *osr,
     // verify that it's safe to composite this main image with the others
     if (strcmp(image->illumination_source,
                first_main_image->illumination_source) ||
-        strcmp(image->objective, first_main_image->objective)) {
+        strcmp(image->objective, first_main_image->objective) ||
+        image->dimensions->len != first_main_image->dimensions->len) {
       g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                   "Slides with dissimilar main images are not supported");
       return false;
