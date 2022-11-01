@@ -611,16 +611,12 @@ static void match_main_image_dimensions(struct collection *collection) {
     nlevel = MIN(nlevel, image->dimensions->len);
   }
 
-  printf("nlevel %d", nlevel);
-
-
   for (i = 0; i < collection->images->len; i++) {
     image = collection->images->pdata[i];
     if (image->is_macro)
       continue;
 
     for (j = image->dimensions->len - 1; j > (nlevel - 1); j-- ) {
-      printf("removing level %d from image %d", j, i);
       g_ptr_array_remove_index(image->dimensions, j);
     }
   }
@@ -751,6 +747,7 @@ static bool create_levels_from_collection(openslide_t *osr,
         }
       }
 
+      // NOTE: The below code seems to introduce a problem for some SCN images
       // /* Aperio Versa's collection sizeX is not the same as sizeX of main image
       //    therefor calculate level width by
       //        ceil(collection->nm_across / l->nm_per_pixel)
@@ -819,6 +816,7 @@ static bool create_levels_from_collection(openslide_t *osr,
     struct level *l = levels->pdata[level_num];
 
     // set level size
+    // NOTE: The below conditional seems to introduce a problem for some SCN images
     // if (strcmp(openslide_get_property_value(osr, "leica.device-model"),
     //            "Versa") != 0) {
       l->base.w = ceil(collection->nm_across / l->nm_per_pixel);
