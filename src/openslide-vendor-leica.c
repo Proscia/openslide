@@ -565,7 +565,7 @@ static struct collection *parse_xml_description(const char *xml,
       g_autofree xmlChar *s = xmlGetProp(sup_image_node, BAD_CAST "type");
       if (s && strcmp((char *) s, "label") == 0) {
         PARSE_INT_ATTRIBUTE_OR_FAIL(sup_image_node, LEICA_ATTR_IFD,
-                                      collection->label_ifd, NULL);
+                                      collection->label_ifd);
       }
     }
   }
