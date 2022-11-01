@@ -562,9 +562,9 @@ static struct collection *parse_xml_description(const char *xml,
       _openslide_xml_xpath_get_node(ctx,
                                     "/d:scn/d:collection/d:supplementalImage");
     if (sup_image_node) {
-      g_autoptr(xmlChar) s = xmlGetProp(sup_image_node, BAD_CAST "type");
+      g_autofree xmlChar *s = xmlGetProp(sup_image_node, BAD_CAST "type");
       if (s && strcmp((char *) s, "label") == 0) {
-        PARSE_INT_ATTRIBUTE_OR_RETURN(sup_image_node, LEICA_ATTR_IFD,
+        PARSE_INT_ATTRIBUTE_OR_FAIL(sup_image_node, LEICA_ATTR_IFD,
                                       collection->label_ifd, NULL);
       }
     }
