@@ -86,6 +86,7 @@ struct read_tile_args {
   struct area *area;
 };
 
+#define NO_SUP_LABEL  -1  // ifd in collection starts with 0
 /* structs representing data parsed from ImageDescription XML */
 struct collection {
   char *barcode;
@@ -94,6 +95,10 @@ struct collection {
   int64_t nm_down;
 
   GPtrArray *images;
+
+  // Aperio Versa has one section for label
+  // <supplementalImage type="label" ifd="6"/>
+  int label_ifd;
 };
 
 struct image {
@@ -429,6 +434,7 @@ static struct collection *parse_xml_description(const char *xml,
   // create collection struct
   collection = g_slice_new0(struct collection);
   collection->images = g_ptr_array_new();
+  collection->label_ifd = NO_SUP_LABEL;
 
   // Get barcode as stored in 2010/10/01 namespace
   char *barcode = _openslide_xml_xpath_get_string(ctx, "/d:scn/d:collection/d:barcode/text()");
@@ -502,13 +508,13 @@ static struct collection *parse_xml_description(const char *xml,
 
     float objective;
     if (strcmp(image->device_model, "Versa") == 0) {
-        /*
-           Note: please refer to: https://github.com/openslide/openslide/pull/348/commits/d2c49b5eec181b7781e600e88df84963dac07280
-           In Aperio Versa SCN files, the macro image has different view sizeY from collection's sizeY, the view offsetY is also not zero.
-           Objective < 2x is likely a macro image
-        */
-        objective = atof(image->objective);
-      image->is_macro = objective < 2;
+      /*
+          Note: please refer to: https://github.com/openslide/openslide/pull/348/commits/d2c49b5eec181b7781e600e88df84963dac07280
+          In Aperio Versa SCN files, the macro image has different view sizeY from collection's sizeY, the view offsetY is also not zero.
+          Objective < 2x is likely a macro image
+      */
+      objective = atof(image->objective);
+      image->is_macro = objective < 2 ? 1 : 0;
     }
 
     // get dimensions
@@ -550,6 +556,18 @@ static struct collection *parse_xml_description(const char *xml,
 
     // sort dimensions
     g_ptr_array_sort(image->dimensions, dimension_compare);
+
+    // find label ifd
+    xmlNode *sup_image_node =
+      _openslide_xml_xpath_get_node(ctx,
+                                    "/d:scn/d:collection/d:supplementalImage");
+    if (sup_image_node) {
+      g_autoptr(xmlChar) s = xmlGetProp(sup_image_node, BAD_CAST "type");
+      if (s && strcmp((char *) s, "label") == 0) {
+        PARSE_INT_ATTRIBUTE_OR_RETURN(sup_image_node, LEICA_ATTR_IFD,
+                                      collection->label_ifd, NULL);
+      }
+    }
   }
 
   success = true;
@@ -598,9 +616,7 @@ static void match_main_image_dimensions(struct collection *collection) {
       continue;
 
     for (j = image->dimensions->len - 1; j > (nlevel - 1); j-- ) {
-      dp = g_ptr_array_remove_index(image->dimensions, j);
-      if (dp)
-        g_slice_free(struct dimension, dp);
+      g_ptr_array_remove_index(image->dimensions, j);
     }
   }
 }
@@ -898,6 +914,12 @@ static bool leica_open(openslide_t *osr, const char *filename,
     goto FAIL;
   }
   collection_free(collection);
+
+  // add associated label for Aperio Versa
+  if (collection->label_ifd != NO_SUP_LABEL) {
+    _openslide_tiff_add_associated_image(osr, "label", tc,
+                                         collection->label_ifd, err);
+  }
 
   // set hash and properties
   struct level *level0 = level_array->pdata[0];
