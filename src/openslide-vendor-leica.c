@@ -610,12 +610,16 @@ static void match_main_image_dimensions(struct collection *collection) {
     nlevel = MIN(nlevel, image->dimensions->len);
   }
 
+  g_debug("nlevel %d", nlevel);
+
+
   for (i = 0; i < collection->images->len; i++) {
     image = collection->images->pdata[i];
     if (image->is_macro)
       continue;
 
     for (j = image->dimensions->len - 1; j > (nlevel - 1); j-- ) {
+      g_debug("removing level %d from image %d", j, i);
       g_ptr_array_remove_index(image->dimensions, j);
     }
   }
