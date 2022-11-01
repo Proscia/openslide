@@ -52,13 +52,13 @@ static const char LEICA_ATTR_IFD[] = "ifd";
 static const char LEICA_ATTR_Z_PLANE[] = "z";
 static const char LEICA_VALUE_BRIGHTFIELD[] = "brightfield";
 
-#define PARSE_INT_ATTRIBUTE_OR_FAIL(NODE, NAME, OUT)		\
+#define PARSE_INT_ATTRIBUTE_OR_RETURN(NODE, NAME, OUT, RET)	\
   do {								\
     GError *tmp_err = NULL;					\
     OUT = _openslide_xml_parse_int_attr(NODE, NAME, &tmp_err);	\
     if (tmp_err)  {						\
       g_propagate_error(err, tmp_err);				\
-      goto FAIL;						\
+      return RET;						\
     }								\
   } while (0)
 
@@ -86,6 +86,7 @@ struct read_tile_args {
   struct area *area;
 };
 
+#define NO_SUP_LABEL  -1  // ifd in collection starts with 0
 /* structs representing data parsed from ImageDescription XML */
 struct collection {
   char *barcode;
@@ -94,6 +95,10 @@ struct collection {
   int64_t nm_down;
 
   GPtrArray *images;
+
+  // Aperio Versa has one section for label
+  // <supplementalImage type="label" ifd="6"/>
+  int label_ifd;
 };
 
 struct image {
@@ -122,12 +127,12 @@ struct dimension {
   double nm_per_pixel;
 };
 
+static void destroy_area(struct area *area) {
+  _openslide_grid_destroy(area->grid);
+  g_slice_free(struct area, area);
+}
+
 static void destroy_level(struct level *l) {
-  for (uint32_t n = 0; n < l->areas->len; n++) {
-    struct area *area = l->areas->pdata[n];
-    _openslide_grid_destroy(area->grid);
-    g_slice_free(struct area, area);
-  }
   g_ptr_array_free(l->areas, true);
   g_slice_free(struct level, l);
 }
@@ -157,28 +162,27 @@ static bool read_tile(openslide_t *osr,
   int64_t th = tiffl->tile_h;
 
   // cache
-  struct _openslide_cache_entry *cache_entry;
+  g_autoptr(_openslide_cache_entry) cache_entry = NULL;
   uint32_t *tiledata = _openslide_cache_get(osr->cache,
                                             args->area, tile_col, tile_row,
                                             &cache_entry);
   if (!tiledata) {
-    tiledata = g_slice_alloc(tw * th * 4);
+    g_auto(_openslide_slice) box = _openslide_slice_alloc(tw * th * 4);
     if (!_openslide_tiff_read_tile(tiffl, args->tiff,
-                                   tiledata, tile_col, tile_row,
+                                   box.p, tile_col, tile_row,
                                    err)) {
-      g_slice_free1(tw * th * 4, tiledata);
       return false;
     }
 
     // clip, if necessary
-    if (!_openslide_tiff_clip_tile(tiffl, tiledata,
+    if (!_openslide_tiff_clip_tile(tiffl, box.p,
                                    tile_col, tile_row,
                                    err)) {
-      g_slice_free1(tw * th * 4, tiledata);
       return false;
     }
 
     // put it in the cache
+    tiledata = _openslide_slice_steal(&box);
     _openslide_cache_put(osr->cache,
 			 args->area, tile_col, tile_row,
 			 tiledata, tw * th * 4,
@@ -186,16 +190,12 @@ static bool read_tile(openslide_t *osr,
   }
 
   // draw it
-  cairo_surface_t *surface = cairo_image_surface_create_for_data((unsigned char *) tiledata,
-                                                                 CAIRO_FORMAT_ARGB32,
-                                                                 tw, th,
-                                                                 tw * 4);
+  g_autoptr(cairo_surface_t) surface =
+    cairo_image_surface_create_for_data((unsigned char *) tiledata,
+                                        CAIRO_FORMAT_ARGB32,
+                                        tw, th, tw * 4);
   cairo_set_source_surface(cr, surface, 0, 0);
-  cairo_surface_destroy(surface);
   cairo_paint(cr);
-
-  // done with the cache entry, release it
-  _openslide_cache_entry_unref(cache_entry);
 
   return true;
 }
@@ -207,10 +207,9 @@ static bool paint_region(openslide_t *osr, cairo_t *cr,
 			 GError **err) {
   struct leica_ops_data *data = osr->data;
   struct level *l = (struct level *) level;
-  bool success = true;
 
-  TIFF *tiff = _openslide_tiffcache_get(data->tc, err);
-  if (tiff == NULL) {
+  g_auto(_openslide_cached_tiff) ct = _openslide_tiffcache_get(data->tc, err);
+  if (ct.tiff == NULL) {
     return false;
   }
 
@@ -218,21 +217,19 @@ static bool paint_region(openslide_t *osr, cairo_t *cr,
     struct area *area = l->areas->pdata[n];
 
     struct read_tile_args args = {
-      .tiff = tiff,
+      .tiff = ct.tiff,
       .area = area,
     };
     int64_t ax = x / l->base.downsample - area->offset_x;
     int64_t ay = y / l->base.downsample - area->offset_y;
-    success = _openslide_grid_paint_region(area->grid, cr, &args,
-                                           ax, ay, level, w, h,
-                                           err);
-    if (!success) {
-      break;
+    if (!_openslide_grid_paint_region(area->grid, cr, &args,
+                                      ax, ay, level, w, h,
+                                      err)) {
+      return false;
     }
   }
 
-  _openslide_tiffcache_put(data->tc, tiff);
-  return success;
+  return true;
 }
 
 static const struct _openslide_ops leica_ops = {
@@ -272,7 +269,7 @@ static bool leica_detect(const char *filename G_GNUC_UNUSED,
   }
 
   // try to parse the xml
-  xmlDoc *doc = _openslide_xml_parse(image_desc, err);
+  g_autoptr(xmlDoc) doc = _openslide_xml_parse(image_desc, err);
   if (doc == NULL) {
     return false;
   }
@@ -282,39 +279,35 @@ static bool leica_detect(const char *filename G_GNUC_UNUSED,
       !_openslide_xml_has_default_namespace(doc, LEICA_XMLNS_2)) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Unexpected XML namespace");
-    xmlFreeDoc(doc);
     return false;
   }
 
-  xmlFreeDoc(doc);
   return true;
 }
 
+static void dimension_free(struct dimension *dimension) {
+  g_slice_free(struct dimension, dimension);
+}
+
+static void image_free(struct image *image) {
+  g_ptr_array_free(image->dimensions, true);
+  g_free(image->creation_date);
+  g_free(image->device_model);
+  g_free(image->device_version);
+  g_free(image->illumination_source);
+  g_free(image->objective);
+  g_free(image->aperture);
+  g_slice_free(struct image, image);
+}
+
 static void collection_free(struct collection *collection) {
-  if (!collection) {
-    return;
-  }
-  for (uint32_t image_num = 0; image_num < collection->images->len;
-       image_num++) {
-    struct image *image = collection->images->pdata[image_num];
-    for (uint32_t dimension_num = 0; dimension_num < image->dimensions->len;
-         dimension_num++) {
-      struct dimension *dimension = image->dimensions->pdata[dimension_num];
-      g_slice_free(struct dimension, dimension);
-    }
-    g_ptr_array_free(image->dimensions, true);
-    g_free(image->creation_date);
-    g_free(image->device_model);
-    g_free(image->device_version);
-    g_free(image->illumination_source);
-    g_free(image->objective);
-    g_free(image->aperture);
-    g_slice_free(struct image, image);
-  }
   g_ptr_array_free(collection->images, true);
   g_free(collection->barcode);
   g_slice_free(struct collection, collection);
 }
+
+typedef struct collection collection;
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(collection, collection_free)
 
 static int dimension_compare(const void *a, const void *b) {
   const struct dimension *da = *(const struct dimension **) a;
@@ -365,13 +358,11 @@ static void set_region_bounds_props(openslide_t *osr,
     g_hash_table_insert(osr->properties,
                         g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_HEIGHT, n),
                         g_strdup_printf("%"PRId64, area->tiffl.image_h));
-
     x0 = MIN(x0, area->offset_x);
     y0 = MIN(y0, area->offset_y);
     x1 = MAX(x1, area->offset_x + area->tiffl.image_w);
     y1 = MAX(y1, area->offset_y + area->tiffl.image_h);
   }
-
 
   g_hash_table_insert(osr->properties,
                       g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_X),
@@ -389,20 +380,14 @@ static void set_region_bounds_props(openslide_t *osr,
 
 static struct collection *parse_xml_description(const char *xml,
                                                 GError **err) {
-  xmlXPathContext *ctx = NULL;
-  xmlXPathObject *images_result = NULL;
-  xmlXPathObject *result = NULL;
-  struct collection *collection = NULL;
-  bool success = false;
-
   // parse the xml
-  xmlDoc *doc = _openslide_xml_parse(xml, err);
+  g_autoptr(xmlDoc) doc = _openslide_xml_parse(xml, err);
   if (doc == NULL) {
-    return false;
+    return NULL;
   }
 
   // create XPATH context to query the document
-  ctx = _openslide_xml_xpath_create(doc);
+  g_autoptr(xmlXPathContext) ctx = _openslide_xml_xpath_create(doc);
 
   // the recognizable structure is the following:
   /*
@@ -423,15 +408,18 @@ static struct collection *parse_xml_description(const char *xml,
   if (!collection_node) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Can't find collection element");
-    goto FAIL;
+    return NULL;
   }
 
   // create collection struct
-  collection = g_slice_new0(struct collection);
-  collection->images = g_ptr_array_new();
+  g_autoptr(collection) collection = g_slice_new0(struct collection);
+  collection->images =
+    g_ptr_array_new_with_free_func((GDestroyNotify) image_free);
+  collection->label_ifd = NO_SUP_LABEL;
 
   // Get barcode as stored in 2010/10/01 namespace
-  char *barcode = _openslide_xml_xpath_get_string(ctx, "/d:scn/d:collection/d:barcode/text()");
+  g_autofree char *barcode =
+    _openslide_xml_xpath_get_string(ctx, "/d:scn/d:collection/d:barcode/text()");
   if (barcode) {
     // Decode Base64
     gsize len;
@@ -439,7 +427,6 @@ static struct collection *parse_xml_description(const char *xml,
     // null-terminate
     collection->barcode = g_realloc(decoded, len + 1);
     collection->barcode[len] = 0;
-    g_free(barcode);
   } else {
     // Fall back to 2010/03/10 namespace.  It's not clear whether this
     // namespace also Base64-encodes the barcode, so we avoid performing
@@ -447,18 +434,19 @@ static struct collection *parse_xml_description(const char *xml,
     collection->barcode = _openslide_xml_xpath_get_string(ctx, "/d:scn/d:collection/@barcode");
   }
 
-  PARSE_INT_ATTRIBUTE_OR_FAIL(collection_node, LEICA_ATTR_SIZE_X,
-                              collection->nm_across);
-  PARSE_INT_ATTRIBUTE_OR_FAIL(collection_node, LEICA_ATTR_SIZE_Y,
-                              collection->nm_down);
+  PARSE_INT_ATTRIBUTE_OR_RETURN(collection_node, LEICA_ATTR_SIZE_X,
+                                collection->nm_across, NULL);
+  PARSE_INT_ATTRIBUTE_OR_RETURN(collection_node, LEICA_ATTR_SIZE_Y,
+                                collection->nm_down, NULL);
 
   // get the image nodes
   ctx->node = collection_node;
-  images_result = _openslide_xml_xpath_eval(ctx, "d:image");
+  g_autoptr(xmlXPathObject) images_result =
+    _openslide_xml_xpath_eval(ctx, "d:image");
   if (!images_result) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Can't find any images");
-    goto FAIL;
+    return NULL;
   }
 
   // create image structs
@@ -471,12 +459,13 @@ static struct collection *parse_xml_description(const char *xml,
     if (!view) {
       g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                   "Can't find view node");
-      goto FAIL;
+      return NULL;
     }
 
     // create image struct
     struct image *image = g_slice_new0(struct image);
-    image->dimensions = g_ptr_array_new();
+    image->dimensions =
+      g_ptr_array_new_with_free_func((GDestroyNotify) dimension_free);
     g_ptr_array_add(collection->images, image);
 
     image->creation_date = _openslide_xml_xpath_get_string(ctx, "d:creationDate/text()");
@@ -486,14 +475,14 @@ static struct collection *parse_xml_description(const char *xml,
     image->objective = _openslide_xml_xpath_get_string(ctx, "d:scanSettings/d:objectiveSettings/d:objective/text()");
     image->aperture = _openslide_xml_xpath_get_string(ctx, "d:scanSettings/d:illuminationSettings/d:numericalAperture/text()");
 
-    PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_SIZE_X,
-                                image->nm_across);
-    PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_SIZE_Y,
-                                image->nm_down);
-    PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_OFFSET_X,
-                                image->nm_offset_x);
-    PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_OFFSET_Y,
-                                image->nm_offset_y);
+    PARSE_INT_ATTRIBUTE_OR_RETURN(view, LEICA_ATTR_SIZE_X,
+                                  image->nm_across, NULL);
+    PARSE_INT_ATTRIBUTE_OR_RETURN(view, LEICA_ATTR_SIZE_Y,
+                                  image->nm_down, NULL);
+    PARSE_INT_ATTRIBUTE_OR_RETURN(view, LEICA_ATTR_OFFSET_X,
+                                  image->nm_offset_x, NULL);
+    PARSE_INT_ATTRIBUTE_OR_RETURN(view, LEICA_ATTR_OFFSET_Y,
+                                  image->nm_offset_y, NULL);
 
     image->is_macro = (image->nm_offset_x == 0 &&
                        image->nm_offset_y == 0 &&
@@ -502,22 +491,19 @@ static struct collection *parse_xml_description(const char *xml,
 
     float objective;
     if (strcmp(image->device_model, "Versa") == 0) {
-        /*
-           Note: please refer to: https://github.com/openslide/openslide/pull/348/commits/d2c49b5eec181b7781e600e88df84963dac07280
-           In Aperio Versa SCN files, the macro image has different view sizeY from collection's sizeY, the view offsetY is also not zero.
-           Objective < 2x is likely a macro image
-        */
-        objective = atof(image->objective);
-      image->is_macro = objective < 2;
+      // image with lowest power objective is likely the macro image
+      objective = atof(image->objective);
+      image->is_macro = objective < 2 ? 1 : 0;
     }
 
     // get dimensions
     ctx->node = image_node;
-    result = _openslide_xml_xpath_eval(ctx, "d:pixels/d:dimension");
+    g_autoptr(xmlXPathObject) result =
+      _openslide_xml_xpath_eval(ctx, "d:pixels/d:dimension");
     if (!result) {
       g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                   "Can't find any dimensions in image");
-      goto FAIL;
+      return NULL;
     }
 
     // create dimension structs
@@ -526,46 +512,42 @@ static struct collection *parse_xml_description(const char *xml,
 
       // accept only dimensions from z-plane 0
       // TODO: support multiple z-planes
-      xmlChar *z = xmlGetProp(dimension_node, BAD_CAST LEICA_ATTR_Z_PLANE);
+      g_autoptr(xmlChar) z =
+        xmlGetProp(dimension_node, BAD_CAST LEICA_ATTR_Z_PLANE);
       if (z && strcmp((char *) z, "0")) {
-        xmlFree(z);
         continue;
       }
-      xmlFree(z);
 
       struct dimension *dimension = g_slice_new0(struct dimension);
       g_ptr_array_add(image->dimensions, dimension);
 
-      PARSE_INT_ATTRIBUTE_OR_FAIL(dimension_node, LEICA_ATTR_IFD,
-                                  dimension->dir);
-      PARSE_INT_ATTRIBUTE_OR_FAIL(dimension_node, LEICA_ATTR_SIZE_X,
-                                  dimension->width);
-      PARSE_INT_ATTRIBUTE_OR_FAIL(dimension_node, LEICA_ATTR_SIZE_Y,
-                                  dimension->height);
+      PARSE_INT_ATTRIBUTE_OR_RETURN(dimension_node, LEICA_ATTR_IFD,
+                                    dimension->dir, NULL);
+      PARSE_INT_ATTRIBUTE_OR_RETURN(dimension_node, LEICA_ATTR_SIZE_X,
+                                    dimension->width, NULL);
+      PARSE_INT_ATTRIBUTE_OR_RETURN(dimension_node, LEICA_ATTR_SIZE_Y,
+                                    dimension->height, NULL);
 
       dimension->nm_per_pixel = (double) image->nm_across / dimension->width;
     }
-    xmlXPathFreeObject(result);
-    result = NULL;
 
     // sort dimensions
     g_ptr_array_sort(image->dimensions, dimension_compare);
   }
 
-  success = true;
-
-FAIL:
-  xmlXPathFreeObject(result);
-  xmlXPathFreeObject(images_result);
-  xmlXPathFreeContext(ctx);
-  xmlFreeDoc(doc);
-
-  if (success) {
-    return collection;
-  } else {
-    collection_free(collection);
-    return NULL;
+  // find label ifd
+  xmlNode *sup_image_node =
+    _openslide_xml_xpath_get_node(ctx,
+                                  "/d:scn/d:collection/d:supplementalImage");
+  if (sup_image_node) {
+    g_autoptr(xmlChar) s = xmlGetProp(sup_image_node, BAD_CAST "type");
+    if (s && strcmp((char *) s, "label") == 0) {
+      PARSE_INT_ATTRIBUTE_OR_RETURN(sup_image_node, LEICA_ATTR_IFD,
+                                    collection->label_ifd, NULL);
+    }
   }
+
+  return g_steal_pointer(&collection);
 }
 
 /*
@@ -580,7 +562,6 @@ FAIL:
  */
 static void match_main_image_dimensions(struct collection *collection) {
   struct image *image;
-  struct dimension *dp;
   guint i, j;
   guint nlevel = G_MAXUINT;
 
@@ -597,10 +578,9 @@ static void match_main_image_dimensions(struct collection *collection) {
     if (image->is_macro)
       continue;
 
-    for (j = image->dimensions->len - 1; j > (nlevel - 1); j-- ) {
-      dp = g_ptr_array_remove_index(image->dimensions, j);
-      if (dp)
-        g_slice_free(struct dimension, dp);
+    for (j = image->dimensions->len - 1; j > (nlevel - 1); j--) {
+      // image->dimensions has GDestroyNotify, it frees the removed dimension
+      g_ptr_array_remove_index(image->dimensions, j);
     }
   }
 }
@@ -705,7 +685,8 @@ static bool create_levels_from_collection(openslide_t *osr,
       if (image == first_main_image) {
         // no level yet; create it
         l = g_slice_new0(struct level);
-        l->areas = g_ptr_array_new();
+        l->areas =
+          g_ptr_array_new_with_free_func((GDestroyNotify) destroy_area);
         l->nm_per_pixel = dimension->nm_per_pixel;
         g_ptr_array_add(levels, l);
       } else {
@@ -865,41 +846,46 @@ static bool create_levels_from_collection(openslide_t *osr,
 static bool leica_open(openslide_t *osr, const char *filename,
                        struct _openslide_tifflike *tl,
                        struct _openslide_hash *quickhash1, GError **err) {
-  GPtrArray *level_array = g_ptr_array_new();
-
   // open TIFF
-  struct _openslide_tiffcache *tc = _openslide_tiffcache_create(filename);
-  TIFF *tiff = _openslide_tiffcache_get(tc, err);
-  if (!tiff) {
-    goto FAIL;
+  g_autoptr(_openslide_tiffcache) tc = _openslide_tiffcache_create(filename);
+  g_auto(_openslide_cached_tiff) ct = _openslide_tiffcache_get(tc, err);
+  if (!ct.tiff) {
+    return false;
   }
 
   // get the xml description
   char *image_desc;
-  if (!TIFFGetField(tiff, TIFFTAG_IMAGEDESCRIPTION, &image_desc)) {
+  if (!TIFFGetField(ct.tiff, TIFFTAG_IMAGEDESCRIPTION, &image_desc)) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Couldn't read ImageDescription");
-    goto FAIL;
+    return false;
   }
 
   // read XML
-  struct collection *collection = parse_xml_description(image_desc, err);
+  g_autoptr(collection) collection = parse_xml_description(image_desc, err);
   if (!collection) {
-    goto FAIL;
+    return false;
   }
 
   match_main_image_dimensions(collection);
 
   // initialize and verify levels
+  g_autoptr(GPtrArray) level_array =
+    g_ptr_array_new_with_free_func((GDestroyNotify) destroy_level);
   int64_t quickhash_dir;
-  if (!create_levels_from_collection(osr, tc, tiff, collection,
+  if (!create_levels_from_collection(osr, tc, ct.tiff, collection,
                                      level_array, &quickhash_dir, err)) {
-    collection_free(collection);
-    goto FAIL;
+    return false;
   }
-  collection_free(collection);
+
+  // add associated label for Aperio Versa
+  if (collection->label_ifd != NO_SUP_LABEL) {
+    _openslide_tiff_add_associated_image(osr, "label", tc,
+                                         collection->label_ifd, err);
+  }
 
   // set hash and properties
+  g_assert(level_array->len > 0);
   struct level *level0 = level_array->pdata[0];
   struct area *property_area = level0->areas->pdata[0];
   tdir_t property_dir = property_area->tiffl.dir;
@@ -907,7 +893,7 @@ static bool leica_open(openslide_t *osr, const char *filename,
                                                     quickhash_dir,
                                                     property_dir,
                                                     err)) {
-    goto FAIL;
+    return false;
   }
 
   // keep the XML document out of the properties
@@ -916,53 +902,31 @@ static bool leica_open(openslide_t *osr, const char *filename,
   g_hash_table_remove(osr->properties, "tiff.ImageDescription");
 
   // set MPP properties
-  if (!_openslide_tiff_set_dir(tiff, property_dir, err)) {
-    goto FAIL;
+  if (!_openslide_tiff_set_dir(ct.tiff, property_dir, err)) {
+    return false;
   }
-  set_resolution_prop(osr, tiff, OPENSLIDE_PROPERTY_NAME_MPP_X,
+  set_resolution_prop(osr, ct.tiff, OPENSLIDE_PROPERTY_NAME_MPP_X,
                       TIFFTAG_XRESOLUTION);
-  set_resolution_prop(osr, tiff, OPENSLIDE_PROPERTY_NAME_MPP_Y,
+  set_resolution_prop(osr, ct.tiff, OPENSLIDE_PROPERTY_NAME_MPP_Y,
                       TIFFTAG_YRESOLUTION);
 
   // set region bounds properties
   set_region_bounds_props(osr, level0);
 
-  // unwrap level array
-  int32_t level_count = level_array->len;
-  g_assert(level_count > 0);
-  struct level **levels =
-    (struct level **) g_ptr_array_free(level_array, false);
-  level_array = NULL;
-
   // allocate private data
   struct leica_ops_data *data = g_slice_new0(struct leica_ops_data);
+  data->tc = g_steal_pointer(&tc);
 
   // store osr data
   g_assert(osr->data == NULL);
   g_assert(osr->levels == NULL);
-  osr->levels = (struct _openslide_level **) levels;
-  osr->level_count = level_count;
+  osr->level_count = level_array->len;
+  osr->levels = (struct _openslide_level **)
+    g_ptr_array_free(g_steal_pointer(&level_array), false);
   osr->data = data;
   osr->ops = &leica_ops;
 
-  // put TIFF handle and store tiffcache reference
-  _openslide_tiffcache_put(tc, tiff);
-  data->tc = tc;
-
   return true;
-
-FAIL:
-  // free the level array
-  if (level_array) {
-    for (uint32_t n = 0; n < level_array->len; n++) {
-      destroy_level(level_array->pdata[n]);
-    }
-    g_ptr_array_free(level_array, true);
-  }
-  // free TIFF
-  _openslide_tiffcache_put(tc, tiff);
-  _openslide_tiffcache_destroy(tc);
-  return false;
 }
 
 const struct _openslide_format _openslide_format_leica = {
