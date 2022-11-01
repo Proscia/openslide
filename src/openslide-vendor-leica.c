@@ -751,15 +751,15 @@ static bool create_levels_from_collection(openslide_t *osr,
         }
       }
 
-      /* Aperio Versa's collection sizeX is not the same as sizeX of main image
-         therefor calculate level width by
-             ceil(collection->nm_across / l->nm_per_pixel)
-         is wrong
-         */
-      if (strcmp(image->device_model, "Versa") == 0) {
-        l->base.w = dimension->width;
-        l->base.h = dimension->height;
-      }
+      // /* Aperio Versa's collection sizeX is not the same as sizeX of main image
+      //    therefor calculate level width by
+      //        ceil(collection->nm_across / l->nm_per_pixel)
+      //    is wrong
+      //    */
+      // if (strcmp(image->device_model, "Versa") == 0) {
+      //   l->base.w = dimension->width;
+      //   l->base.h = dimension->height;
+      // }
 
       // create area
       struct area *area = g_slice_new0(struct area);
@@ -819,11 +819,11 @@ static bool create_levels_from_collection(openslide_t *osr,
     struct level *l = levels->pdata[level_num];
 
     // set level size
-    if (strcmp(openslide_get_property_value(osr, "leica.device-model"),
-               "Versa") != 0) {
+    // if (strcmp(openslide_get_property_value(osr, "leica.device-model"),
+    //            "Versa") != 0) {
       l->base.w = ceil(collection->nm_across / l->nm_per_pixel);
       l->base.h = ceil(collection->nm_down / l->nm_per_pixel);
-    }
+    // }
     //g_debug("level %d, nm/pixel %g", level_num, l->nm_per_pixel);
 
     // convert area offsets from nm to pixels
