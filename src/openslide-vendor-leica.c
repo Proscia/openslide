@@ -36,6 +36,7 @@
 
 #include <glib.h>
 #include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <tiffio.h>
@@ -610,7 +611,7 @@ static void match_main_image_dimensions(struct collection *collection) {
     nlevel = MIN(nlevel, image->dimensions->len);
   }
 
-  g_debug("nlevel %d", nlevel);
+  printf("nlevel %d", nlevel);
 
 
   for (i = 0; i < collection->images->len; i++) {
@@ -619,7 +620,7 @@ static void match_main_image_dimensions(struct collection *collection) {
       continue;
 
     for (j = image->dimensions->len - 1; j > (nlevel - 1); j-- ) {
-      g_debug("removing level %d from image %d", j, i);
+      printf("removing level %d from image %d", j, i);
       g_ptr_array_remove_index(image->dimensions, j);
     }
   }
