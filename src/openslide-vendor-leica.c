@@ -87,6 +87,7 @@ struct read_tile_args {
 };
 
 #define NO_SUP_LABEL  -1  // ifd in collection starts with 0
+
 /* structs representing data parsed from ImageDescription XML */
 struct collection {
   char *barcode;
@@ -417,6 +418,7 @@ static struct collection *parse_xml_description(const char *xml,
     g_ptr_array_new_with_free_func((GDestroyNotify) image_free);
   collection->label_ifd = NO_SUP_LABEL;
 
+
   // Get barcode as stored in 2010/10/01 namespace
   g_autofree char *barcode =
     _openslide_xml_xpath_get_string(ctx, "/d:scn/d:collection/d:barcode/text()");
@@ -485,9 +487,7 @@ static struct collection *parse_xml_description(const char *xml,
                                   image->nm_offset_y, NULL);
 
     image->is_macro = (image->nm_offset_x == 0 &&
-                       image->nm_offset_y == 0 &&
-                       image->nm_across == collection->nm_across &&
-                       image->nm_down == collection->nm_down);
+                       image->nm_across == collection->nm_across);
 
     float objective;
     if (strcmp(image->device_model, "Versa") == 0) {
@@ -533,6 +533,20 @@ static struct collection *parse_xml_description(const char *xml,
 
     // sort dimensions
     g_ptr_array_sort(image->dimensions, dimension_compare);
+  }
+	
+  // find label ifd
+  xmlNode *sup_image_node = _openslide_xml_xpath_get_node(ctx,
+                                   "/d:scn/d:collection/d:supplementalImage");
+  if (sup_image_node) {
+      xmlChar *s = xmlGetProp(sup_image_node, BAD_CAST "type");
+      if (s && strcmp((char *) s, "label") == 0) {
+          PARSE_INT_ATTRIBUTE_OR_FAIL(sup_image_node, LEICA_ATTR_IFD,
+                                      collection->label_ifd);
+      }
+
+      if (s)
+          xmlFree(s);
   }
 
   // find label ifd
