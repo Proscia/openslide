@@ -87,7 +87,9 @@ struct read_tile_args {
   struct area *area;
 };
 
-#define NO_SUP_LABEL  -1  // ifd in collection starts with 0
+
+#define NO_SUP_LABEL -1 // ifd in collection starts with 0
+
 /* structs representing data parsed from ImageDescription XML */
 struct collection {
   char *barcode;
@@ -371,13 +373,11 @@ static void set_region_bounds_props(openslide_t *osr,
     g_hash_table_insert(osr->properties,
                         g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_HEIGHT, n),
                         g_strdup_printf("%"PRId64, area->tiffl.image_h));
-
     x0 = MIN(x0, area->offset_x);
     y0 = MIN(y0, area->offset_y);
     x1 = MAX(x1, area->offset_x + area->tiffl.image_w);
     y1 = MAX(y1, area->offset_y + area->tiffl.image_h);
   }
-
 
   g_hash_table_insert(osr->properties,
                       g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_X),
@@ -434,6 +434,7 @@ static struct collection *parse_xml_description(const char *xml,
 
   // create collection struct
   collection = g_slice_new0(struct collection);
+  collection->label_ifd = NO_SUP_LABEL;
   collection->images = g_ptr_array_new();
   collection->label_ifd = NO_SUP_LABEL;
 
@@ -503,9 +504,7 @@ static struct collection *parse_xml_description(const char *xml,
                                 image->nm_offset_y);
 
     image->is_macro = (image->nm_offset_x == 0 &&
-                       image->nm_offset_y == 0 &&
-                       image->nm_across == collection->nm_across &&
-                       image->nm_down == collection->nm_down);
+                       image->nm_across == collection->nm_across);
 
     float objective;
     if (strcmp(image->device_model, "Versa") == 0) {
@@ -516,6 +515,7 @@ static struct collection *parse_xml_description(const char *xml,
       */
       objective = atof(image->objective);
       image->is_macro = objective < 2 ? 1 : 0;
+
     }
 
     // get dimensions
@@ -570,6 +570,20 @@ static struct collection *parse_xml_description(const char *xml,
       }
     }
   }
+	
+  // find label ifd
+  xmlNode *sup_image_node = _openslide_xml_xpath_get_node(ctx,
+                                   "/d:scn/d:collection/d:supplementalImage");
+  if (sup_image_node) {
+      xmlChar *s = xmlGetProp(sup_image_node, BAD_CAST "type");
+      if (s && strcmp((char *) s, "label") == 0) {
+          PARSE_INT_ATTRIBUTE_OR_FAIL(sup_image_node, LEICA_ATTR_IFD,
+                                      collection->label_ifd);
+      }
+
+      if (s)
+          xmlFree(s);
+  }
 
   success = true;
 
@@ -621,6 +635,7 @@ static void match_main_image_dimensions(struct collection *collection) {
     }
   }
 }
+
 
 static void set_prop(openslide_t *osr, const char *name, const char *value) {
   if (value) {
@@ -758,6 +773,7 @@ static bool create_levels_from_collection(openslide_t *osr,
       //   l->base.h = dimension->height;
       // }
 
+
       // create area
       struct area *area = g_slice_new0(struct area);
       struct _openslide_tiff_level *tiffl = &area->tiffl;
@@ -822,6 +838,7 @@ static bool create_levels_from_collection(openslide_t *osr,
       l->base.w = ceil(collection->nm_across / l->nm_per_pixel);
       l->base.h = ceil(collection->nm_down / l->nm_per_pixel);
     // }
+
     //g_debug("level %d, nm/pixel %g", level_num, l->nm_per_pixel);
 
     // convert area offsets from nm to pixels
@@ -907,8 +924,6 @@ static bool leica_open(openslide_t *osr, const char *filename,
     goto FAIL;
   }
 
-  match_main_image_dimensions(collection);
-
   // initialize and verify levels
   int64_t quickhash_dir;
   if (!create_levels_from_collection(osr, tc, tiff, collection,
@@ -916,6 +931,13 @@ static bool leica_open(openslide_t *osr, const char *filename,
     collection_free(collection);
     goto FAIL;
   }
+
+  // add associated label for Aperio Versa
+  if (collection->label_ifd != NO_SUP_LABEL) {
+      _openslide_tiff_add_associated_image(osr, "label", tc,
+                                           collection->label_ifd, err);
+  }
+	
   collection_free(collection);
 
   // add associated label for Aperio Versa
