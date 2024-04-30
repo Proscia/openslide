@@ -276,6 +276,14 @@ static bool huron_detect(const char *filename G_GNUC_UNUSED,
       return true;
     }
   }
+
+  // err may be populated at this point if the TIFFTAG_MAKE was not found. 
+  // since we continue to search for other tags, we need to clear the error to 
+  // avoid overwriting it with a different error.
+  if (*err != NULL) {
+    g_clear_error(err);
+  }
+
   // check ImageSoftware
   tagval = _openslide_tifflike_get_buffer(tl, 0,
                                           TIFFTAG_SOFTWARE,
@@ -285,6 +293,14 @@ static bool huron_detect(const char *filename G_GNUC_UNUSED,
       return true;
     }
   }
+
+  // at this point neither tag we checked exists on the image
+  // so we clear the error one more time so we can set an indication
+  // that this is not a Huron slide.
+  if (*err != NULL) {
+    g_clear_error(err);
+  }
+
   // else
   g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
               "Not a Huron slide");
