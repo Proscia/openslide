@@ -27,7 +27,19 @@ RUN apt-get update -y && \
     cmake \
     xdelta3 \
     libjpeg-progs \
+    uthash-dev \
+    libzstd-dev \
     ;
+
+# libdicom
+RUN cd /tmp && \
+    git clone https://github.com/ImagingDataCommons/libdicom.git && \
+    cd ./libdicom && \
+    git checkout v1.2.0 && \
+    meson setup builddir --buildtype release && \
+    meson compile -C builddir && \
+    meson install -C builddir && \
+    ldconfig
 
 # Install dependencies from pip
 RUN pip install pyaml requests

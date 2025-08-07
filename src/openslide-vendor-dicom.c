@@ -468,11 +468,15 @@ static bool decode_frame(struct dicom_file *file,
   uint32_t frame_length = dcm_frame_get_length(frame);
   uint32_t frame_width = dcm_frame_get_columns(frame);
   uint32_t frame_height = dcm_frame_get_rows(frame);
+  //JTS Motic has w & h reversed. Check area rather than dimensions. Per Adam for associated images only.
+  //JTS Roche has incorrect height: this is a legitimate error tbh.
   if (frame_width != w || frame_height != h) {
-    g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
-                "Unexpected image size: %ux%u != %"PRId64"x%"PRId64,
-                frame_width, frame_height, w, h);
-    return false;
+     if (w*h!=frame_width*frame_height) {
+      g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                  "Unexpected image size: %ux%u != %"PRId64"x%"PRId64,
+                  frame_width, frame_height, w, h);
+      return false;
+    }
   }
 
   switch (file->format) {
@@ -676,6 +680,9 @@ static bool associated_get_argb_data(struct _openslide_associated_image *img,
                                      GError **err) {
   struct associated *a = (struct associated *) img;
   g_auto(dicom_file_io) fio G_GNUC_UNUSED = dicom_file_io_get(a->file);
+
+//JTS: ONLY ASSOCIATED IMAGES, NOT TILES
+
   return decode_frame(a->file, 0, 0, dest, a->base.w, a->base.h, err);
 }
 
