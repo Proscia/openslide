@@ -178,11 +178,16 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
     //JTS MOTIC PROBLEM
     if(w*h!=width*height) {
      g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
-                  "JTS Dimensional mismatch reading JPEG, "
+                  "Dimensional mismatch reading JPEG, "
                   "expected %dx%d, got %dx%d",
                   w, h, width, height);
       return false;
     }
+    //JTS SWAP
+    cinfo->output_width=height;
+    cinfo->output_height=width;
+
+
   }
 
   // verify we haven't run already
