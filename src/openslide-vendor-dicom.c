@@ -470,7 +470,7 @@ static bool decode_frame(struct dicom_file *file,
   uint32_t frame_height = dcm_frame_get_rows(frame);
   
   if (frame_width != w || frame_height != h) {
-      printf("Warning: Image dimensions (%d,%d) are different from DCM version (%d,%d). Suppressing exception.\n", frame_width, frame_height, w, h);
+      printf("Warning: Image dimensions (%d,%d) are different from the DCM version (%d,%d). Suppressing exception.\n", frame_width, frame_height, w, h);
   }
   
   switch (file->format) {
@@ -675,6 +675,9 @@ static bool associated_get_argb_data(struct _openslide_associated_image *img,
                                      GError **err) {
   struct associated *a = (struct associated *) img;
   g_auto(dicom_file_io) fio G_GNUC_UNUSED = dicom_file_io_get(a->file);
+
+  setAssociatedFileFlag(true); //PPT-1288 
+
   return decode_frame(a->file, 0, 0, dest, a->base.w, a->base.h, err);
 }
 
