@@ -30,7 +30,7 @@
 #include <glib.h>
 #include <setjmp.h>
 
-extern bool ASSOCIATED_FILE_FLAG; //PPT-1288
+extern __thread bool ASSOCIATED_FILE_FLAG;
 void setAssociatedFileFlag(); 
 
 bool _openslide_jpeg_read_file_dimensions(struct _openslide_file *f,

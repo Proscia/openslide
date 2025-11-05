@@ -53,7 +53,7 @@ static const uint8_t one_pixel_rgb_jpeg[] = {
   0x00, 0x00, 0x3f, 0x00, 0x7f, 0x3f, 0x9f, 0xdf, 0xff, 0xd9
 };
 
-bool ASSOCIATED_FILE_FLAG = false;  
+__thread bool ASSOCIATED_FILE_FLAG = false;
 
 static GOnce jcs_alpha_extensions_detector = G_ONCE_INIT;
 
@@ -154,11 +154,10 @@ void _openslide_jpeg_decompress_init(struct _openslide_jpeg_decompress *dc,
   jpeg_create_decompress(&dc->cinfo);
 }
 
-//PPT-1288
 void transformWidthHeightRGBA(uint8_t* const rgbaPixels, int width, int height)
 {
   //Flip pixels along diagonal and invert in Y. Not worth SIMD
-  printf("Applying Width/Height Transform on associated file\n");
+  printf("Applying Width/Height Transform on associated file.\n");
   const uint numbytes=width*height*4;
   uint8_t* const tempbuf = (uint8_t*)(malloc(numbytes));
   if (!tempbuf) {
@@ -261,8 +260,8 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
 
   if (ASSOCIATED_FILE_FLAG && (w!=width || h!=height) && (w==height && h==width)) {
     transformWidthHeightRGBA(_dest, cinfo->output_width, cinfo->output_height);
-    ASSOCIATED_FILE_FLAG=false; //Self cancel the flag
   }
+  ASSOCIATED_FILE_FLAG=false; 
 
   return true;
 }

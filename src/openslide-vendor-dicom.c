@@ -676,7 +676,7 @@ static bool associated_get_argb_data(struct _openslide_associated_image *img,
   struct associated *a = (struct associated *) img;
   g_auto(dicom_file_io) fio G_GNUC_UNUSED = dicom_file_io_get(a->file);
 
-  setAssociatedFileFlag(true); //PPT-1288 
+  setAssociatedFileFlag(true); 
 
   return decode_frame(a->file, 0, 0, dest, a->base.w, a->base.h, err);
 }
