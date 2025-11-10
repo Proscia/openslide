@@ -469,8 +469,8 @@ static bool decode_frame(struct dicom_file *file,
   uint32_t frame_width = dcm_frame_get_columns(frame);
   uint32_t frame_height = dcm_frame_get_rows(frame);
   
-  if (frame_width != w || frame_height != h) {
-      printf("Warning: Image dimensions (%d,%d) are different from the DCM version (%d,%d). Suppressing exception.\n", frame_width, frame_height, w, h);
+  if (ASSOCIATED_FILE_FLAG && (frame_width != w || frame_height != h)) {
+      printf("Warning: The image dimensions (%d,%d) are different from the DCM version (%d,%d). Suppressing exception.\n", frame_width, frame_height, w, h);
   }
   
   switch (file->format) {
