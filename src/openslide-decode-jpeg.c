@@ -53,6 +53,9 @@ static const uint8_t one_pixel_rgb_jpeg[] = {
   0x00, 0x00, 0x3f, 0x00, 0x7f, 0x3f, 0x9f, 0xdf, 0xff, 0xd9
 };
 
+// Thread-local flag to suppress dimension mismatch errors for associated images
+// WARNING: Must be set immediately before decode and reset immediately after
+// to prevent state leakage within the same thread.
 __thread bool ASSOCIATED_FILE_FLAG = false;
 
 static GOnce jcs_alpha_extensions_detector = G_ONCE_INIT;
@@ -154,7 +157,7 @@ void _openslide_jpeg_decompress_init(struct _openslide_jpeg_decompress *dc,
   jpeg_create_decompress(&dc->cinfo);
 }
 
-void transformWidthHeightRGBA(uint8_t* const rgbaPixels, int width, int height)
+static void transformWidthHeightRGBA(uint8_t* const rgbaPixels, int width, int height)
 {
   //Flip pixels along diagonal and invert in Y. Not worth SIMD
   printf("Applying Width/Height Transform on associated file.\n");
@@ -201,6 +204,16 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
   // ensure buffer dimensions are correct
   int32_t width = cinfo->output_width;
   int32_t height = cinfo->output_height;
+
+  if ((w != width || h != height) && !ASSOCIATED_FILE_FLAG) {
+    _openslide_jpeg_set_associated_file_flag(false);
+
+    g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                "Dimensional mismatch reading JPEG, "
+                "expected %dx%d, got %dx%d",
+                w, h, width, height);
+    return false;
+  }
 
 
   // verify we haven't run already
@@ -261,7 +274,8 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
   if (ASSOCIATED_FILE_FLAG && (w!=width || h!=height) && (w==height && h==width)) {
     transformWidthHeightRGBA(_dest, cinfo->output_width, cinfo->output_height);
   }
-  ASSOCIATED_FILE_FLAG=false; 
+
+  _openslide_jpeg_set_associated_file_flag(false); 
 
   return true;
 }
@@ -476,6 +490,25 @@ bool _openslide_jpeg_add_associated_image(openslide_t *osr,
   return true;
 }
 
-void setAssociatedFileFlag() {
-    ASSOCIATED_FILE_FLAG=true;
+
+/*
+* RAII implementation to manage flag setting on early return or error.
+* Note that in the event of an error we always want to return the state of the flag to "false"
+* If the method to grab associated image data is called again, it will be responsible for setting the flag to true.
+*/
+struct _openslide_jpeg_flag_guard
+_openslide_jpeg_flag_guard_set(bool value) {
+  struct _openslide_jpeg_flag_guard guard = {
+    .original_state = false
+  };
+  ASSOCIATED_FILE_FLAG = value;
+  return guard;
+}
+
+void _openslide_jpeg_flag_guard_restore(struct _openslide_jpeg_flag_guard *guard) {
+  ASSOCIATED_FILE_FLAG = guard->original_state;
+}
+
+void _openslide_jpeg_set_associated_file_flag(bool flag) {
+    ASSOCIATED_FILE_FLAG = flag;
 }

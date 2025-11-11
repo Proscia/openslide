@@ -1,5 +1,5 @@
 
-from ubuntu:22.04 
+FROM ubuntu:22.04 
 
 # Switch to 'root' user
 USER root:root
@@ -27,7 +27,19 @@ RUN apt-get update -y && \
     cmake \
     xdelta3 \
     libjpeg-progs \
+    gdb \
+    libzstd-dev \
+    valgrind \
     ;
+
+RUN cd /tmp && \
+    git clone https://github.com/ImagingDataCommons/libdicom.git && \
+    cd ./libdicom && \
+    git checkout v1.2.0 && \
+    meson setup builddir --buildtype release && \
+    meson compile -C builddir && \
+    meson install -C builddir && \
+    ldconfig
 
 # Install dependencies from pip
 RUN pip install pyaml requests

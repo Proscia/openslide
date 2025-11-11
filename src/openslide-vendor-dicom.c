@@ -469,8 +469,15 @@ static bool decode_frame(struct dicom_file *file,
   uint32_t frame_width = dcm_frame_get_columns(frame);
   uint32_t frame_height = dcm_frame_get_rows(frame);
   
-  if (ASSOCIATED_FILE_FLAG && (frame_width != w || frame_height != h)) {
-      printf("Warning: The image dimensions (%d,%d) are different from the DCM version (%d,%d). Suppressing exception.\n", frame_width, frame_height, w, h);
+  if (frame_width != w || frame_height != h) {
+      if(ASSOCIATED_FILE_FLAG) {
+        printf("Warning: The image dimensions (%u,%u) are different from the DCM version (%"PRId64",%"PRId64"). Suppressing exception.\n", frame_width, frame_height, w, h);
+      } else {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Frame dimensions (%u,%u) != expected (%"PRId64",%"PRId64")",
+                    frame_width, frame_height, w, h);
+        return false;
+      }
   }
   
   switch (file->format) {
@@ -492,6 +499,9 @@ static bool decode_frame(struct dicom_file *file,
     }
     rgb_to_cairo(frame_value, dest, w, h);
   }
+
+  _openslide_jpeg_set_associated_file_flag(false);
+
   return true;
 }
 
@@ -509,6 +519,9 @@ static bool read_tile(openslide_t *osr,
                       int64_t tile_col, int64_t tile_row,
                       void *arg G_GNUC_UNUSED,
                       GError **err) {
+  // if reading tiles and associated images on the same thread we need to make sure we're resetting the flag.
+  _openslide_jpeg_set_associated_file_flag(false);
+
   struct dicom_level *l = (struct dicom_level *) level;
 
   // cache
@@ -676,7 +689,8 @@ static bool associated_get_argb_data(struct _openslide_associated_image *img,
   struct associated *a = (struct associated *) img;
   g_auto(dicom_file_io) fio G_GNUC_UNUSED = dicom_file_io_get(a->file);
 
-  setAssociatedFileFlag(true); 
+  g_auto(_openslide_jpeg_flag_guard) guard = 
+    _openslide_jpeg_flag_guard_set(true);
 
   return decode_frame(a->file, 0, 0, dest, a->base.w, a->base.h, err);
 }
