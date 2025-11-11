@@ -53,6 +53,11 @@ static const uint8_t one_pixel_rgb_jpeg[] = {
   0x00, 0x00, 0x3f, 0x00, 0x7f, 0x3f, 0x9f, 0xdf, 0xff, 0xd9
 };
 
+// Thread-local flag to suppress dimension mismatch errors for associated images
+// WARNING: Must be set immediately before decode and reset immediately after
+// to prevent state leakage within the same thread.
+__thread bool ASSOCIATED_FILE_FLAG = false;
+
 static GOnce jcs_alpha_extensions_detector = G_ONCE_INIT;
 
 struct openslide_jpeg_error_mgr {
@@ -152,6 +157,31 @@ void _openslide_jpeg_decompress_init(struct _openslide_jpeg_decompress *dc,
   jpeg_create_decompress(&dc->cinfo);
 }
 
+static void transformWidthHeightRGBA(uint8_t* const rgbaPixels, int width, int height)
+{
+  //Flip pixels along diagonal and invert in Y. Not worth SIMD
+  printf("Applying Width/Height Transform on associated file.\n");
+  const uint numbytes=width*height*4;
+  uint8_t* const tempbuf = (uint8_t*)(malloc(numbytes));
+  if (!tempbuf) {
+      fprintf(stderr, "Allocation failed\n");
+      return;
+  }
+  uint32_t* t=(uint32_t*)tempbuf;
+  uint32_t* p;
+  for (int y = width-1; y >=0; --y)
+  {
+    p=(uint32_t*)rgbaPixels+y;
+    for (int x = 0; x < height; ++x)
+    {
+      *t++=*p;
+      p+=width;
+    }
+  }
+  memcpy(rgbaPixels,tempbuf,numbytes);
+  free(tempbuf);
+}
+
 bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
                                     // uint8_t * if grayscale, else uint32_t *
                                     void *_dest,
@@ -174,7 +204,10 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
   // ensure buffer dimensions are correct
   int32_t width = cinfo->output_width;
   int32_t height = cinfo->output_height;
-  if (w != width || h != height) {
+
+  if ((w != width || h != height) && !ASSOCIATED_FILE_FLAG) {
+    _openslide_jpeg_set_associated_file_flag(false);
+
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Dimensional mismatch reading JPEG, "
                 "expected %dx%d, got %dx%d",
@@ -182,12 +215,12 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
     return false;
   }
 
+
   // verify we haven't run already
   g_assert(dc->rows[0] == NULL);
 
   if (cinfo->out_color_space != JCS_RGB) {
     // decode directly to output
-
     uint8_t *dest = _dest;
     int bytes_per_pixel = cinfo->output_components == 1 ? 1 : 4;
     while (cinfo->output_scanline < cinfo->output_height) {
@@ -206,7 +239,6 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
 
   } else {
     // decode into temporary buffer, then reformat
-
     // allocate scanline buffers
     gsize allocated_row_size = sizeof(JSAMPLE) * cinfo->output_width *
                                cinfo->output_components;
@@ -238,6 +270,13 @@ bool _openslide_jpeg_decompress_run(struct _openslide_jpeg_decompress *dc,
       }
     }
   }
+
+  if (ASSOCIATED_FILE_FLAG && (w!=width || h!=height) && (w==height && h==width)) {
+    transformWidthHeightRGBA(_dest, cinfo->output_width, cinfo->output_height);
+  }
+
+  _openslide_jpeg_set_associated_file_flag(false); 
+
   return true;
 }
 
@@ -319,7 +358,6 @@ static bool jpeg_decode(struct _openslide_file *f,  // or:
                         int32_t w, int32_t h,
                         GError **err) {
   jmp_buf env;
-
   struct jpeg_decompress_struct *cinfo;
   g_auto(_openslide_jpeg_decompress) dc =
     _openslide_jpeg_decompress_create(&cinfo);
@@ -385,8 +423,6 @@ bool _openslide_jpeg_decode_buffer_colorspace(const void *buf, uint32_t len,
                                               uint32_t *dest,
                                               int32_t w, int32_t h,
                                               GError **err) {
-  //g_debug("decode JPEG buffer colorspace: %x %u", buf, len);
-
   return jpeg_decode(NULL, buf, len, space, dest, false, w, h, err);
 }
 
@@ -404,12 +440,11 @@ static bool get_associated_image_data(struct _openslide_associated_image *_img,
                                       GError **err) {
   struct associated_image *img = (struct associated_image *) _img;
 
-  //g_debug("read JPEG associated image: %s %"PRId64, img->filename, img->offset);
-
   g_autoptr(_openslide_file) f = _openslide_fopen(img->filename, err);
   if (f == NULL) {
     return false;
   }
+
   return _openslide_jpeg_read_file(f, img->offset, dest,
                                    img->base.w, img->base.h, err);
 }
@@ -431,6 +466,7 @@ bool _openslide_jpeg_add_associated_image(openslide_t *osr,
 					  const char *filename,
 					  int64_t offset,
 					  GError **err) {
+
   g_autoptr(_openslide_file) f = _openslide_fopen(filename, err);
   if (f == NULL) {
     return false;
@@ -452,4 +488,27 @@ bool _openslide_jpeg_add_associated_image(openslide_t *osr,
   g_hash_table_insert(osr->associated_images, g_strdup(name), img);
 
   return true;
+}
+
+
+/*
+* RAII implementation to manage flag setting on early return or error.
+* Note that in the event of an error we always want to return the state of the flag to "false"
+* If the method to grab associated image data is called again, it will be responsible for setting the flag to true.
+*/
+struct _openslide_jpeg_flag_guard
+_openslide_jpeg_flag_guard_set(bool value) {
+  struct _openslide_jpeg_flag_guard guard = {
+    .original_state = false
+  };
+  ASSOCIATED_FILE_FLAG = value;
+  return guard;
+}
+
+void _openslide_jpeg_flag_guard_restore(struct _openslide_jpeg_flag_guard *guard) {
+  ASSOCIATED_FILE_FLAG = guard->original_state;
+}
+
+void _openslide_jpeg_set_associated_file_flag(bool flag) {
+    ASSOCIATED_FILE_FLAG = flag;
 }

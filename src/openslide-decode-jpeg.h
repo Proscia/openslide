@@ -30,6 +30,25 @@
 #include <glib.h>
 #include <setjmp.h>
 
+extern __thread bool ASSOCIATED_FILE_FLAG;
+void _openslide_jpeg_set_associated_file_flag(bool flag);
+
+/*
+ * RAII guard for safely managing ASSOCIATED_FILE_FLAG state.
+ * Use with g_auto() to ensure flag is restored even on early return or error.
+ */
+struct _openslide_jpeg_flag_guard {
+  bool original_state;
+};
+
+struct _openslide_jpeg_flag_guard _openslide_jpeg_flag_guard_set(bool value);
+
+void _openslide_jpeg_flag_guard_restore(struct _openslide_jpeg_flag_guard *guard);
+
+typedef struct _openslide_jpeg_flag_guard _openslide_jpeg_flag_guard;
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(_openslide_jpeg_flag_guard,
+                                 _openslide_jpeg_flag_guard_restore)
+
 bool _openslide_jpeg_read_file_dimensions(struct _openslide_file *f,
                                           int64_t offset,
                                           int32_t *w, int32_t *h,
