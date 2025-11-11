@@ -481,11 +481,10 @@ static bool decode_frame(struct dicom_file *file,
   }
   
   switch (file->format) {
-  case FORMAT_JPEG: {
+  case FORMAT_JPEG:
     return _openslide_jpeg_decode_buffer_colorspace(frame_value, frame_length,
                                                     file->jpeg_colorspace,
                                                     dest, w, h, err);
-  }
   case FORMAT_JPEG2000:
     return _openslide_jp2k_decode_buffer(dest, w, h,
                                          frame_value, frame_length,
